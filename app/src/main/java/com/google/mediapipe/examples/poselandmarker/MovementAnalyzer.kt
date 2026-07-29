@@ -11,7 +11,7 @@ class MovementAnalyzer {
 
     // Metrics
     var score = 0
-    var stability = 100f
+    var stability = 0f
     var rom = 0f
     var executionTime = 0L
     var maxHeight = 0f
@@ -20,19 +20,20 @@ class MovementAnalyzer {
     var reactionTime = 0L
     
     // State
+    var isInPose = false
     private var isLegLifted = false
     private var startTime = 0L
-    private var lastNoseX = 0.5f
     var targetFish: Pair<Float, Float>? = null
 
     fun reset() {
         score = 0
-        stability = 100f
+        stability = 0f
         rom = 0f
         executionTime = 0L
         maxHeight = 0f
         squatDepth = 0f
         fishCaught = 0
+        isInPose = false
         isLegLifted = false
         startTime = 0L
         targetFish = null
@@ -50,39 +51,90 @@ class MovementAnalyzer {
     }
 
     private fun analyzeFlamenco(landmarks: List<NormalizedLandmark>) {
-        val leftAnkle = landmarks[27]
-        val rightAnkle = landmarks[28]
+        val leftAnkle = landmarks[27]; val rightAnkle = landmarks[28]
+        val leftKnee = landmarks[25]; val rightKnee = landmarks[26]
+        val leftHip = landmarks[23]; val rightHip = landmarks[24]
+        val leftShoulder = landmarks[11]; val rightShoulder = landmarks[12]
         val nose = landmarks[0]
 
-        val diff = abs(leftAnkle.y() - rightAnkle.y())
-        val threshold = 0.08f
+        val diffY = abs(leftAnkle.y() - rightAnkle.y())
+        val threshold = 0.12f // Stricter threshold for lifting
 
-        if (diff > threshold && !isLegLifted) {
+        // 1. Detect if a leg is actually lifted high enough
+        val isLeftLifted = leftAnkle.y() < rightAnkle.y() - threshold
+        val isRightLifted = rightAnkle.y() < leftAnkle.y() - threshold
+        
+        // Stricter: Both feet must not be near the same Y level
+        val bothFeetDown = abs(leftAnkle.y() - rightAnkle.y()) < 0.06f
+
+        val liftedAnkle = if (isLeftLifted) leftAnkle else if (isRightLifted) rightAnkle else null
+        val supportAnkle = if (isLeftLifted) rightAnkle else if (isRightLifted) leftAnkle else null
+        val supportKnee = if (isLeftLifted) rightKnee else if (isRightLifted) leftKnee else null
+
+        // 2. Validate "Flamingo Pose" (Foot near support knee)
+        if (!bothFeetDown && liftedAnkle != null && supportKnee != null) {
+            val distToKneeX = abs(liftedAnkle.x() - supportKnee.x())
+            val distToKneeY = abs(liftedAnkle.y() - supportKnee.y())
+            
+            // Stricter pose validation
+            if (distToKneeX < 0.1f && distToKneeY < 0.12f) {
+                isInPose = true
+            } else {
+                isInPose = false
+            }
+        } else {
+            isInPose = false
+        }
+
+        // 3. Start/Stop session based on pose
+        if (isInPose && !isLegLifted) {
             isLegLifted = true
             startTime = SystemClock.uptimeMillis()
             maxHeight = 0f
-        } else if (diff < threshold * 0.6f && isLegLifted) {
+        } else if (!isInPose && isLegLifted) {
             isLegLifted = false
             val duration = SystemClock.uptimeMillis() - startTime
             executionTime = duration
-            score += (duration / 500).toInt() + (maxHeight * 200).toInt()
+            score += (duration / 1000).toInt() * 10 // 10 points per second
         }
 
-            // Stability: Always measure horizontal deviation of the nose
-            val deviation = abs(nose.x() - lastNoseX)
-            stability = (stability * 0.95f + (1.0f - min(deviation * 10f, 1f)) * 100f * 0.05f).coerceIn(0f, 100f)
-            lastNoseX = nose.x()
+        // 4. Calculate Stability
+        var currentFrameStability: Float
+        
+        if (isInPose && supportAnkle != null) {
+            // A. Balance Axis (Nose over support foot)
+            val balanceError = abs(nose.x() - supportAnkle.x())
+            val balanceScore = (1.0f - (balanceError / 0.15f)).coerceIn(0f, 1f) * 60f
+            
+            // B. Torso Tilt (Shoulders vs Hips)
+            val shoulderMidX = (leftShoulder.x() + rightShoulder.x()) / 2f
+            val hipMidX = (leftHip.x() + rightHip.x()) / 2f
+            val tiltError = abs(shoulderMidX - hipMidX)
+            val tiltScore = (1.0f - (tiltError / 0.08f)).coerceIn(0f, 1f) * 20f
+            
+            // C. Shoulder Level (Horizontal shoulders)
+            val shoulderLevelError = abs(leftShoulder.y() - rightShoulder.y())
+            val levelScore = (1.0f - (shoulderLevelError / 0.05f)).coerceIn(0f, 1f) * 20f
+            
+            currentFrameStability = balanceScore + tiltScore + levelScore
+        } else {
+            // Quick decay to 0 if not in pose
+            currentFrameStability = 0f
+        }
 
-            if (isLegLifted) {
-                maxHeight = max(maxHeight, diff)
-                executionTime = SystemClock.uptimeMillis() - startTime
-                
-                // ROM for Flamenco: Angle of the lifted knee
-                val hip = if (leftAnkle.y() < rightAnkle.y()) landmarks[23] else landmarks[24]
-                val knee = if (leftAnkle.y() < rightAnkle.y()) landmarks[25] else landmarks[26]
-                val ankle = if (leftAnkle.y() < rightAnkle.y()) landmarks[27] else landmarks[28]
-                rom = calculateAngle(hip, knee, ankle)
-            }
+        // Smoothing
+        val alpha = if (isInPose) 0.15f else 0.4f
+        stability = (stability * (1f - alpha) + currentFrameStability * alpha).coerceIn(0f, 100f)
+
+        if (isLegLifted) {
+            maxHeight = max(maxHeight, diffY)
+            executionTime = SystemClock.uptimeMillis() - startTime
+            
+            val hip = if (isLeftLifted) leftHip else rightHip
+            val knee = if (isLeftLifted) leftKnee else rightKnee
+            val ankle = if (isLeftLifted) leftAnkle else rightAnkle
+            rom = calculateAngle(hip, knee, ankle)
+        }
     }
 
     private fun analyzeSurf(landmarks: List<NormalizedLandmark>) {

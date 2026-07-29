@@ -26,6 +26,7 @@ import androidx.core.content.ContextCompat
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -43,6 +44,8 @@ class OverlayView(context: Context?, attrs: AttributeSet?) :
     private var scaleFactor: Float = 1f
     private var imageWidth: Int = 1
     private var imageHeight: Int = 1
+    private var offsetX: Float = 0f
+    private var offsetY: Float = 0f
 
     init {
         initPaints()
@@ -85,18 +88,18 @@ class OverlayView(context: Context?, attrs: AttributeSet?) :
             for (landmark in poseLandmarkerResult.landmarks()) {
                 for (normalizedLandmark in landmark) {
                     canvas.drawPoint(
-                        normalizedLandmark.x() * imageWidth * scaleFactor,
-                        normalizedLandmark.y() * imageHeight * scaleFactor,
+                        normalizedLandmark.x() * imageWidth * scaleFactor + offsetX,
+                        normalizedLandmark.y() * imageHeight * scaleFactor + offsetY,
                         pointPaint
                     )
                 }
 
                 PoseLandmarker.POSE_LANDMARKS.forEach {
                     canvas.drawLine(
-                        landmark.get(it!!.start()).x() * imageWidth * scaleFactor,
-                        landmark.get(it.start()).y() * imageHeight * scaleFactor,
-                        landmark.get(it.end()).x() * imageWidth * scaleFactor,
-                        landmark.get(it.end()).y() * imageHeight * scaleFactor,
+                        landmark.get(it!!.start()).x() * imageWidth * scaleFactor + offsetX,
+                        landmark.get(it.start()).y() * imageHeight * scaleFactor + offsetY,
+                        landmark.get(it.end()).x() * imageWidth * scaleFactor + offsetX,
+                        landmark.get(it.end()).y() * imageHeight * scaleFactor + offsetY,
                         linePaint
                     )
                 }
@@ -112,7 +115,47 @@ class OverlayView(context: Context?, attrs: AttributeSet?) :
                 MovementAnalyzer.GameMode.FLAMENCO -> drawFlamencoGame(canvas, ana)
                 else -> {}
             }
+
+            // Draw status message
+            drawStatusMessage(canvas, ana)
         }
+    }
+
+    private fun drawStatusMessage(canvas: Canvas, ana: MovementAnalyzer) {
+        if (ana.currentMode != MovementAnalyzer.GameMode.FLAMENCO) return
+        
+        val message = when {
+            !ana.isInPose -> "ESPERANDO POSTURA..."
+            ana.stability < 30 -> "¡MUÉVETE MENOS!"
+            ana.stability < 70 -> "¡ESTABILÍZATE!"
+            else -> "¡MUY BIEN!"
+        }
+        
+        textPaint.color = when {
+            !ana.isInPose -> Color.WHITE
+            ana.stability < 50 -> Color.RED
+            else -> Color.GREEN
+        }
+        
+        // Smaller text size to avoid cutting off
+        textPaint.textSize = 42f
+        val textWidth = textPaint.measureText(message)
+        
+        // Draw a semi-transparent background for the message
+        gamePaint.color = Color.BLACK
+        gamePaint.alpha = 100
+        val padding = 20f
+        val textHeight = 42f
+        canvas.drawRect(
+            (width - textWidth) / 2f - padding,
+            height * 0.15f - textHeight,
+            (width + textWidth) / 2f + padding,
+            height * 0.15f + padding,
+            gamePaint
+        )
+        
+        canvas.drawText(message, (width - textWidth) / 2f, height * 0.15f, textPaint)
+        textPaint.textSize = 48f // Reset to default
     }
 
     private fun drawMetrics(canvas: Canvas, ana: MovementAnalyzer) {
@@ -133,7 +176,16 @@ class OverlayView(context: Context?, attrs: AttributeSet?) :
 
         canvas.drawText("PUNTAJE: ${ana.score}", xPos, yPos, textPaint)
         yPos += lineSpacing
+        
+        // Dynamic color for stability
+        textPaint.color = when {
+            ana.stability > 80 -> Color.GREEN
+            ana.stability > 50 -> Color.YELLOW
+            else -> Color.RED
+        }
         canvas.drawText("ESTABILIDAD: ${ana.stability.toInt()}%", xPos, yPos, textPaint)
+        textPaint.color = Color.WHITE
+        
         yPos += lineSpacing
         canvas.drawText("ROM: ${ana.rom.toInt()}°", xPos, yPos, textPaint)
         yPos += lineSpacing
@@ -177,7 +229,62 @@ class OverlayView(context: Context?, attrs: AttributeSet?) :
         gamePaint.alpha = 100
         val barHeight = ana.maxHeight * height
         canvas.drawRect(width - 100f, height - barHeight, width - 50f, height.toFloat(), gamePaint)
-        canvas.drawText("ALTURA", width - 250f, height - 20f, textPaint)
+        
+        // Draw Balance Axis and Straightness indicators
+        results?.let { poseLandmarkerResult ->
+            if (poseLandmarkerResult.landmarks().isNotEmpty()) {
+                val landmarks = poseLandmarkerResult.landmarks()[0]
+                val leftAnkle = landmarks[27]; val rightAnkle = landmarks[28]
+                val leftShoulder = landmarks[11]; val rightShoulder = landmarks[12]
+                val leftHip = landmarks[23]; val rightHip = landmarks[24]
+                val nose = landmarks[0]
+                
+                // 1. Support Leg Axis
+                val isLeftLifted = leftAnkle.y() < rightAnkle.y() - 0.1f
+                val isRightLifted = rightAnkle.y() < leftAnkle.y() - 0.1f
+                val supportAnkle = if (isLeftLifted) rightAnkle else if (isRightLifted) leftAnkle else null
+                
+                if (supportAnkle != null) {
+                    val lineX = supportAnkle.x() * imageWidth * scaleFactor + offsetX
+                    gamePaint.color = Color.WHITE
+                    gamePaint.alpha = 80
+                    gamePaint.strokeWidth = 4f
+                    canvas.drawLine(lineX, 0f, lineX, height.toFloat(), gamePaint)
+                    
+                    // Balance point (Nose)
+                    val noseX = nose.x() * imageWidth * scaleFactor + offsetX
+                    val noseY = nose.y() * imageHeight * scaleFactor + offsetY
+                    gamePaint.color = if (abs(nose.x() - supportAnkle.x()) < 0.05f) Color.GREEN else Color.RED
+                    gamePaint.alpha = 200
+                    canvas.drawCircle(noseX, noseY, 20f, gamePaint)
+                }
+
+                // 2. Straightness: Shoulders Horizontal
+                val sLeftX = leftShoulder.x() * imageWidth * scaleFactor + offsetX
+                val sLeftY = leftShoulder.y() * imageHeight * scaleFactor + offsetY
+                val sRightX = rightShoulder.x() * imageWidth * scaleFactor + offsetX
+                val sRightY = rightShoulder.y() * imageHeight * scaleFactor + offsetY
+                
+                val shoulderTilt = abs(leftShoulder.y() - rightShoulder.y())
+                gamePaint.color = if (shoulderTilt < 0.04f) Color.GREEN else Color.RED
+                gamePaint.strokeWidth = 10f
+                canvas.drawLine(sLeftX, sLeftY, sRightX, sRightY, gamePaint)
+
+                // 3. Torso Alignment (Shoulders over Hips)
+                val shoulderMidX = (leftShoulder.x() + rightShoulder.x()) / 2f
+                val hipMidX = (leftHip.x() + rightHip.x()) / 2f
+                if (abs(shoulderMidX - hipMidX) > 0.05f) {
+                    gamePaint.color = Color.RED
+                    gamePaint.alpha = 150
+                    // Draw warning arrow or line
+                    val midSX = shoulderMidX * imageWidth * scaleFactor + offsetX
+                    val midSY = (leftShoulder.y() + rightShoulder.y()) / 2f * imageHeight * scaleFactor + offsetY
+                    val midHX = hipMidX * imageWidth * scaleFactor + offsetX
+                    val midHY = (leftHip.y() + rightHip.y()) / 2f * imageHeight * scaleFactor + offsetY
+                    canvas.drawLine(midSX, midSY, midHX, midHY, gamePaint)
+                }
+            }
+        }
     }
 
     fun setResults(
@@ -197,12 +304,15 @@ class OverlayView(context: Context?, attrs: AttributeSet?) :
                 min(width * 1f / imageWidth, height * 1f / imageHeight)
             }
             RunningMode.LIVE_STREAM -> {
-                // PreviewView is in FILL_START mode. So we need to scale up the
-                // landmarks to match with the size that the captured images will be
-                // displayed.
+                // Use MAX to fill the screen (FILL_CENTER) as it's more common
+                // and often matches how CameraX displays the preview by default
                 max(width * 1f / imageWidth, height * 1f / imageHeight)
             }
         }
+        
+        offsetX = (width - imageWidth * scaleFactor) / 2f
+        offsetY = (height - imageHeight * scaleFactor) / 2f
+        
         invalidate()
     }
 
