@@ -122,21 +122,33 @@ class OverlayView(context: Context?, attrs: AttributeSet?) :
     }
 
     private fun drawStatusMessage(canvas: Canvas, ana: MovementAnalyzer) {
-        if (ana.currentMode != MovementAnalyzer.GameMode.FLAMENCO) return
-        
-        val message = when {
-            !ana.isInPose -> "ESPERANDO POSTURA..."
-            ana.stability < 30 -> "¡MUÉVETE MENOS!"
-            ana.stability < 70 -> "¡ESTABILÍZATE!"
-            else -> "¡MUY BIEN!"
+        if (ana.currentMode == MovementAnalyzer.GameMode.NONE) return
+
+        val message: String
+        when {
+            // Mal parada (vale para los dos juegos): aviso en rojo.
+            ana.positionWarning.isNotEmpty() -> {
+                message = ana.positionWarning
+                textPaint.color = Color.RED
+            }
+            // Flamenco: mensajes de estabilidad como antes.
+            ana.currentMode == MovementAnalyzer.GameMode.FLAMENCO -> {
+                message = when {
+                    !ana.isInPose -> "ESPERANDO POSTURA..."
+                    ana.stability < 30 -> "¡MUÉVETE MENOS!"
+                    ana.stability < 70 -> "¡ESTABILÍZATE!"
+                    else -> "¡MUY BIEN!"
+                }
+                textPaint.color = when {
+                    !ana.isInPose -> Color.WHITE
+                    ana.stability < 50 -> Color.RED
+                    else -> Color.GREEN
+                }
+            }
+            // Surf bien parada: pantalla limpia.
+            else -> return
         }
-        
-        textPaint.color = when {
-            !ana.isInPose -> Color.WHITE
-            ana.stability < 50 -> Color.RED
-            else -> Color.GREEN
-        }
-        
+
         // Smaller text size to avoid cutting off
         textPaint.textSize = 42f
         val textWidth = textPaint.measureText(message)
@@ -207,10 +219,12 @@ class OverlayView(context: Context?, attrs: AttributeSet?) :
         val top = height * 0.85f
         canvas.drawRoundRect(left, top, left + boardWidth, top + boardHeight, 20f, 20f, gamePaint)
 
-        // Draw Target Fish
+        // Draw Target Fish / Estrella.
+        // Si está mal parada, se dibuja en gris para marcar que NO cuenta.
         ana.targetFish?.let { fish ->
-            gamePaint.color = Color.CYAN
-            gamePaint.alpha = 255
+            val active = ana.isWellPositioned
+            gamePaint.color = if (active) Color.CYAN else Color.GRAY
+            gamePaint.alpha = if (active) 255 else 120
             canvas.drawCircle(fish.first * width, fish.second * height, 40f, gamePaint)
             
             // simple fish tail

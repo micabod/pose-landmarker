@@ -25,6 +25,12 @@ class MovementAnalyzer {
     private var startTime = 0L
     var targetFish: Pair<Float, Float>? = null
 
+    // Postura general (compartida por los dos juegos)
+    // isWellPositioned = la persona está bien parada y se puede sumar puntaje.
+    // positionWarning = motivo cuando está mal parada ("" si está bien).
+    var isWellPositioned = false
+    var positionWarning: String = ""
+
     fun reset() {
         score = 0
         stability = 0f
@@ -37,6 +43,8 @@ class MovementAnalyzer {
         isLegLifted = false
         startTime = 0L
         targetFish = null
+        isWellPositioned = false
+        positionWarning = ""
     }
 
     fun analyze(result: PoseLandmarkerResult) {
@@ -56,6 +64,23 @@ class MovementAnalyzer {
         val leftHip = landmarks[23]; val rightHip = landmarks[24]
         val leftShoulder = landmarks[11]; val rightShoulder = landmarks[12]
         val nose = landmarks[0]
+
+        // 0. Chequeo global: cuerpo visible, de frente y a buena distancia.
+        // Si está mal parada no puede estar en una pose válida: se corta acá.
+        val globalOk = checkGlobalPosition(landmarks)
+        isWellPositioned = globalOk
+        if (!globalOk) {
+            // Si estaba haciendo la pose, se cierra la repetición en curso.
+            if (isLegLifted) {
+                isLegLifted = false
+                val duration = SystemClock.uptimeMillis() - startTime
+                executionTime = duration
+                score += (duration / 1000).toInt() * 10
+            }
+            isInPose = false
+            stability = (stability * 0.6f).coerceIn(0f, 100f)
+            return
+        }
 
         val diffY = abs(leftAnkle.y() - rightAnkle.y())
         val threshold = 0.12f // Stricter threshold for lifting
@@ -140,36 +165,100 @@ class MovementAnalyzer {
     private fun analyzeSurf(landmarks: List<NormalizedLandmark>) {
         val leftHip = landmarks[23]; val leftKnee = landmarks[25]; val leftAnkle = landmarks[27]
         val rightHip = landmarks[24]; val rightKnee = landmarks[26]; val rightAnkle = landmarks[28]
+        val leftShoulder = landmarks[11]; val rightShoulder = landmarks[12]
         val leftWrist = landmarks[15]; val rightWrist = landmarks[16]
         val nose = landmarks[0]
 
-        // 1. Squat Angle
+        // 0. Chequeo global: cuerpo visible, de frente y a buena distancia.
+        val globalOk = checkGlobalPosition(landmarks)
+
+        // Postura del ejercicio (flexible): torso centrado y hombros nivelados.
+        val centerHipsX = (leftHip.x() + rightHip.x()) / 2f
+        val lean = abs(nose.x() - centerHipsX)
+        val shoulderTilt = abs(leftShoulder.y() - rightShoulder.y())
+        val postureOk = lean < 0.18f && shoulderTilt < 0.12f
+        if (globalOk && !postureOk) positionWarning = "PONETE DERECHA Y DE FRENTE"
+
+        // Solo se puede sumar si está bien parada Y con buena postura.
+        isWellPositioned = globalOk && postureOk
+
+        // 1. Squat Angle (métrica)
         val leftAngle = calculateAngle(leftHip, leftKnee, leftAnkle)
         val rightAngle = calculateAngle(rightHip, rightKnee, rightAnkle)
         rom = (leftAngle + rightAngle) / 2f
         squatDepth = 180f - rom
 
         // 2. Stability
-        val centerHipsX = (leftHip.x() + rightHip.x()) / 2f
-        stability = (100f - abs(nose.x() - centerHipsX) * 200f).coerceIn(0f, 100f)
+        stability = (100f - lean * 200f).coerceIn(0f, 100f)
 
-        // 3. Catch Fish
+        // 3. Las estrellas SIEMPRE aparecen, pero solo cuentan si está bien parada.
         if (targetFish == null) spawnFish()
-        
-        targetFish?.let { fish ->
-            val distL = sqrt((leftWrist.x() - fish.first).pow(2) + (leftWrist.y() - fish.second).pow(2))
-            val distR = sqrt((rightWrist.x() - fish.first).pow(2) + (rightWrist.y() - fish.second).pow(2))
-            
-            if (distL < 0.08f || distR < 0.08f) {
-                fishCaught++
-                score += 15
-                spawnFish()
+
+        if (isWellPositioned) {
+            targetFish?.let { fish ->
+                val distL = sqrt((leftWrist.x() - fish.first).pow(2) + (leftWrist.y() - fish.second).pow(2))
+                val distR = sqrt((rightWrist.x() - fish.first).pow(2) + (rightWrist.y() - fish.second).pow(2))
+
+                if (distL < 0.08f || distR < 0.08f) {
+                    fishCaught++
+                    score += 15
+                    spawnFish()
+                }
             }
         }
     }
 
     private fun spawnFish() {
         targetFish = Pair((0.2f..0.8f).random(), (0.3f..0.6f).random())
+    }
+
+    // Puntos clave que tienen que estar visibles para poder jugar:
+    // hombros (11,12), caderas (23,24), rodillas (25,26), tobillos (27,28).
+    private val keyPoints = intArrayOf(11, 12, 23, 24, 25, 26, 27, 28)
+
+    // Confianza de que el punto es visible (si MediaPipe no la informa, asumimos visible).
+    private fun vis(lm: NormalizedLandmark): Float =
+        try { lm.visibility().orElse(1f) } catch (e: Exception) { 1f }
+
+    /**
+     * Regla común a los dos juegos. Devuelve true si la persona está BIEN parada:
+     * cuerpo visible y en cuadro, de frente a la cámara y a una distancia razonable.
+     * Si está mal, deja el motivo en [positionWarning]. Umbrales flexibles.
+     */
+    private fun checkGlobalPosition(landmarks: List<NormalizedLandmark>): Boolean {
+        // 1. Puntos clave visibles y dentro del cuadro (no cortada por el borde).
+        for (i in keyPoints) {
+            val lm = landmarks[i]
+            if (vis(lm) < 0.3f ||
+                lm.x() < 0.02f || lm.x() > 0.98f ||
+                lm.y() < 0.02f || lm.y() > 0.98f
+            ) {
+                positionWarning = "PONETE EN CUADRO"
+                return false
+            }
+        }
+
+        val ls = landmarks[11]; val rs = landmarks[12]
+        val lh = landmarks[23]; val rh = landmarks[24]
+        val la = landmarks[27]; val ra = landmarks[28]
+
+        // 2. Distancia: alto del cuerpo en pantalla (hombros -> tobillos).
+        val shoulderMidY = (ls.y() + rs.y()) / 2f
+        val ankleMidY = (la.y() + ra.y()) / 2f
+        val bodySpan = abs(ankleMidY - shoulderMidY)
+        if (bodySpan < 0.25f) { positionWarning = "ACERCATE A LA CÁMARA"; return false }
+        if (bodySpan > 0.97f) { positionWarning = "ALEJATE UN POCO"; return false }
+
+        // 3. De frente: de costado, el ancho de hombros/caderas se achica mucho.
+        val shoulderWidth = abs(ls.x() - rs.x())
+        val hipWidth = abs(lh.x() - rh.x())
+        if (shoulderWidth < 0.06f || hipWidth < 0.05f) {
+            positionWarning = "PONETE DE FRENTE"
+            return false
+        }
+
+        positionWarning = ""
+        return true
     }
 
     private fun calculateAngle(p1: NormalizedLandmark, p2: NormalizedLandmark, p3: NormalizedLandmark): Float {
