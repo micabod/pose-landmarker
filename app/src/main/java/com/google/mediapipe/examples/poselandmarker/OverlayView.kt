@@ -204,8 +204,14 @@ class OverlayView(context: Context?, attrs: AttributeSet?) :
         
         if (ana.currentMode == MovementAnalyzer.GameMode.FLAMENCO) {
             canvas.drawText("TIEMPO: ${(ana.executionTime / 1000f)}s", xPos, yPos, textPaint)
+            yPos += lineSpacing
+            canvas.drawText("REPS: ${ana.reps}", xPos, yPos, textPaint)
+            yPos += lineSpacing
+            canvas.drawText("CALIDAD: ${ana.lastRepQuality}%", xPos, yPos, textPaint)
         } else if (ana.currentMode == MovementAnalyzer.GameMode.SURF_CATCH) {
             canvas.drawText("PECES: ${ana.fishCaught}", xPos, yPos, textPaint)
+            yPos += lineSpacing
+            canvas.drawText("CALIDAD: ${ana.lastRepQuality}%", xPos, yPos, textPaint)
         }
     }
 

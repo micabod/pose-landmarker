@@ -18,7 +18,14 @@ class MovementAnalyzer {
     var squatDepth = 0f
     var fishCaught = 0
     var reactionTime = 0L
-    
+
+    // Sprint 6: sistema de repeticiones y puntaje por calidad
+    var reps = 0                 // repeticiones válidas completadas
+    var lastRepQuality = 0       // calidad (estabilidad promedio) de la última repetición, 0–100
+    private var stabilitySum = 0f    // acumulador de estabilidad durante la repetición en curso
+    private var stabilityFrames = 0  // cantidad de frames acumulados en la repetición
+    private val repTargetMs = 3000L  // un hold cuenta como repetición a partir de 3 segundos
+
     // State
     var isInPose = false
     private var isLegLifted = false
@@ -39,6 +46,10 @@ class MovementAnalyzer {
         maxHeight = 0f
         squatDepth = 0f
         fishCaught = 0
+        reps = 0
+        lastRepQuality = 0
+        stabilitySum = 0f
+        stabilityFrames = 0
         isInPose = false
         isLegLifted = false
         startTime = 0L
@@ -73,9 +84,7 @@ class MovementAnalyzer {
             // Si estaba haciendo la pose, se cierra la repetición en curso.
             if (isLegLifted) {
                 isLegLifted = false
-                val duration = SystemClock.uptimeMillis() - startTime
-                executionTime = duration
-                score += (duration / 1000).toInt() * 10
+                finishRep()
             }
             isInPose = false
             stability = (stability * 0.6f).coerceIn(0f, 100f)
@@ -116,11 +125,12 @@ class MovementAnalyzer {
             isLegLifted = true
             startTime = SystemClock.uptimeMillis()
             maxHeight = 0f
+            // Sprint 6: arranca una nueva repetición → reinicio el acumulador de calidad
+            stabilitySum = 0f
+            stabilityFrames = 0
         } else if (!isInPose && isLegLifted) {
             isLegLifted = false
-            val duration = SystemClock.uptimeMillis() - startTime
-            executionTime = duration
-            score += (duration / 1000).toInt() * 10 // 10 points per second
+            finishRep()
         }
 
         // 4. Calculate Stability
@@ -154,11 +164,37 @@ class MovementAnalyzer {
         if (isLegLifted) {
             maxHeight = max(maxHeight, diffY)
             executionTime = SystemClock.uptimeMillis() - startTime
-            
+
+            // Sprint 6: voy sumando la estabilidad de cada frame para calcular
+            // la calidad promedio de la repetición cuando termine.
+            stabilitySum += stability
+            stabilityFrames++
+
             val hip = if (isLeftLifted) leftHip else rightHip
             val knee = if (isLeftLifted) leftKnee else rightKnee
             val ankle = if (isLeftLifted) leftAnkle else rightAnkle
             rom = calculateAngle(hip, knee, ankle)
+        }
+    }
+
+    /**
+     * Sprint 6 — cierra la repetición en curso y aplica el puntaje por calidad.
+     * Una repetición solo cuenta si se sostuvo al menos [repTargetMs]; los puntos
+     * dependen de la estabilidad promedio mantenida durante el hold, no solo del tiempo.
+     */
+    private fun finishRep() {
+        val duration = SystemClock.uptimeMillis() - startTime
+        executionTime = duration
+
+        // Calidad = estabilidad promedio durante el hold (0–100)
+        val avgQuality = if (stabilityFrames > 0) stabilitySum / stabilityFrames else 0f
+
+        if (duration >= repTargetMs) {
+            reps++
+            lastRepQuality = avgQuality.toInt()
+            // Puntaje ponderado por calidad: segundos sostenidos * 10 * (calidad / 100)
+            val seconds = duration / 1000f
+            score += (seconds * 10f * (avgQuality / 100f)).toInt()
         }
     }
 
@@ -201,7 +237,10 @@ class MovementAnalyzer {
 
                 if (distL < 0.08f || distR < 0.08f) {
                     fishCaught++
-                    score += 15
+                    // Sprint 6: puntaje por calidad — la estrella vale según la
+                    // estabilidad al momento de atraparla, no un valor fijo.
+                    lastRepQuality = stability.toInt()
+                    score += (15f * (stability / 100f)).toInt()
                     spawnFish()
                 }
             }
